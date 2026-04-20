@@ -24,6 +24,8 @@
   var meetingStartWallMs = null;
   var rubTimerId = null;
   var kopTimerId = null;
+  var rounds = [];
+  var roundsUnlocked = false;
 
   var initialTheme = loadThemePreference();
   document.documentElement.setAttribute("data-theme", initialTheme);
@@ -36,6 +38,10 @@
   var elPerMinuteRow = document.getElementById("per-minute-row");
   var elElapsedRow = document.getElementById("elapsed-row");
   var elElapsed = document.getElementById("elapsed-display");
+  var elRoundsSection = document.getElementById("rounds-section");
+  var elRoundsTrack = document.getElementById("rounds-track");
+  var elRoundAddBtn = document.getElementById("round-add-btn");
+  var elRoundAddValue = document.getElementById("round-add-value");
   var elGrades = document.getElementById("grades-list");
   var elStartTrigger = document.getElementById("start-time-trigger");
   var elStartPopover = document.getElementById("start-time-popover");
@@ -251,6 +257,119 @@
     return Math.max(0, Date.now() - meetingStartWallMs);
   }
 
+  function resetRounds() {
+    rounds = [];
+    roundsUnlocked = false;
+  }
+
+  function ensureInitialRound() {
+    if (meetingStartWallMs == null || rounds.length > 0) return;
+
+    rounds.push({
+      startMs: meetingStartWallMs,
+      endMs: null
+    });
+  }
+
+  function activeRound() {
+    if (rounds.length === 0) return null;
+    return rounds[rounds.length - 1];
+  }
+
+  function roundElapsedMs(round, nowMs) {
+    if (!round) return 0;
+
+    var endMs = round.endMs == null ? nowMs : round.endMs;
+    return Math.max(0, endMs - round.startMs);
+  }
+
+  function roundCostRubles(round, nowMs) {
+    return costPerMinuteRub() * (roundElapsedMs(round, nowMs) / 60000);
+  }
+
+  function renderRounds() {
+    var nowMs = Date.now();
+    var visibleRounds = roundsUnlocked
+      ? rounds.filter(function (round) {
+          return round.endMs != null;
+        })
+      : [];
+
+    elRoundsTrack.innerHTML = visibleRounds
+      .map(function (round, index) {
+        return (
+          '<article class="rounds__card">' +
+          '<div class="rounds__meta">' +
+          '<h3 class="rounds__title">Раунд ' +
+          String(index + 1) +
+          "</h3>" +
+          '<span class="rounds__time">' +
+          formatElapsed(roundElapsedMs(round, nowMs)) +
+          "</span>" +
+          "</div>" +
+          '<span class="rounds__money">' +
+          formatMoney(roundCostRubles(round, nowMs)) +
+          " руб." +
+          "</span>" +
+          "</article>"
+        );
+      })
+      .join("");
+
+    renderRoundButton(nowMs);
+  }
+
+  function renderRoundButton(nowMs) {
+    var active = roundsUnlocked ? activeRound() : null;
+
+    if (!active) {
+      elRoundAddValue.textContent = "";
+      return;
+    }
+
+    elRoundAddValue.textContent = formatMoney(roundCostRubles(active, nowMs || Date.now())) + " руб.";
+  }
+
+  function syncRoundsVisibility(participants) {
+    var hasMeeting = participants > 0 && meetingStartWallMs != null;
+    elRoundsSection.hidden = !hasMeeting;
+    elRoundAddBtn.disabled = !hasMeeting;
+  }
+
+  function keepRoundButtonInView() {
+    window.requestAnimationFrame(function () {
+      elRoundAddBtn.scrollIntoView({
+        behavior: "smooth",
+        block: "nearest",
+        inline: "end"
+      });
+    });
+  }
+
+  function startNextRound() {
+    var nowMs = Date.now();
+    var previousRound = activeRound();
+    var startMs = meetingStartWallMs;
+
+    if (meetingStartWallMs == null || totalParticipants() === 0) return;
+    ensureInitialRound();
+    previousRound = activeRound();
+
+    if (previousRound) {
+      previousRound.endMs = nowMs;
+      startMs = nowMs;
+    }
+
+    rounds.push({
+      startMs: startMs,
+      endMs: null
+    });
+
+    roundsUnlocked = true;
+    renderRounds();
+    keepRoundButtonInView();
+  }
+
   function currentMeetingCostRubles() {
     if (totalParticipants() === 0 || meetingStartWallMs == null) return 0;
     return costPerMinuteRub() * (elapsedSinceStartMs() / 60000);
@@ -291,6 +410,10 @@
     if (meetingStartWallMs != null) {
       elElapsed.textContent = formatElapsed(elapsedSinceStartMs());
     }
+
+    if (rounds.length > 0) {
+      renderRoundButton(Date.now());
+    }
   }
 
   function applyKopOnly() {
@@ -300,6 +423,10 @@
 
     elTotalKop.textContent = String(kop).padStart(2, "0");
     setAriaLabelFromRublesFloat(total);
+
+    if (rounds.length > 0) {
+      renderRoundButton(Date.now());
+    }
   }
 
   function formatElapsed(ms) {
@@ -386,16 +513,21 @@
     if (participants === 0) {
       stopCostTimers();
       closeStartPopover();
+      resetRounds();
       setTotalDisplay(0);
       elPerMinute.textContent = formatMoney(0);
       elPerMinuteRow.hidden = true;
       elElapsedRow.hidden = true;
+      syncRoundsVisibility(participants);
+      renderRounds();
       return;
     }
 
     elPerMinute.textContent = formatMoney(perMinute);
     elPerMinuteRow.hidden = false;
     elElapsedRow.hidden = false;
+    ensureInitialRound();
+    syncRoundsVisibility(participants);
 
     ensureCostTimers();
     applyRubAndElapsed();
@@ -449,7 +581,10 @@
     if (isNaN(hours) || isNaN(minutes)) return;
 
     meetingStartWallMs = wallMsFromTimeInput(hours, minutes);
+    resetRounds();
+    ensureInitialRound();
     closeStartPopover();
+    renderRounds();
     applyRubAndElapsed();
     applyKopOnly();
   }
@@ -459,9 +594,12 @@
 
     if (prevTotal === 0 && participants > 0) {
       meetingStartWallMs = Date.now();
+      resetRounds();
+      ensureInitialRound();
     } else if (participants === 0) {
       meetingStartWallMs = null;
       stopCostTimers();
+      resetRounds();
     }
 
     updateDom();
@@ -695,6 +833,10 @@
   elThemeToggle.addEventListener("click", function () {
     var currentTheme = document.documentElement.getAttribute("data-theme");
     applyTheme(currentTheme === "dark" ? "light" : "dark");
+  });
+
+  elRoundAddBtn.addEventListener("click", function () {
+    startNextRound();
   });
 
   elSettingsClose.addEventListener("click", function () {
